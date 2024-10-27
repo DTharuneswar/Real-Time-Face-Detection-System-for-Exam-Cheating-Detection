@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Advanced Face Detection</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                min-height: 100vh;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                padding: 20px;
+                color: #2d3748;
+            }
+
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+            }
+
+            /* Modern Login Container Styles */
+            #login-container {
+                max-width: 450px;
+                margin: 100px auto;
+                padding: 40px;
+                background: rgba(255, 255, 255, 0.95);
+                border-radius: 16px;
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+                backdrop-filter: blur(10px);
+                transform: translateY(0);
+                transition: all 0.3s ease;
+            }
+
+            #login-container:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 15px 30px rgba(0, 0, 0, 0.3);
+            }
+
+            h2 {
+                font-size: 28px;
+                margin-bottom: 25px;
+                color: #1a202c;
+                font-weight: 600;
+            }
+
+            input[type="text"] {
+                width: 100%;
+                padding: 15px;
+                margin: 15px 0;
+                border: 2px solid #e2e8f0;
+                border-radius: 8px;
+                font-size: 16px;
+                transition: all 0.3s ease;
+                background: white;
+            }
+
+            input[type="text"]:focus {
+                outline: none;
+                border-color: #667eea;
+                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+            }
+
+            button {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 15px 30px;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 16px;
+                font-weight: 600;
+                width: 100%;
+                transition: all 0.3s ease;
+                margin-top: 10px;
+            }
+
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+            }
+
+            /* Original Main Container Styles */
+            #main-container {
+                display: none;
+                background-color: #f5f5f5;
+                padding: 20px;
+                text-align: center;
+            }
+
+            #status {
+                margin: 15px 0;
+                padding: 15px;
+                background-color: #fff;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+
+            #video-feed {
+                border: 3px solid #ddd;
+                border-radius: 12px;
+                max-width: 100%;
+                height: auto;
+            }
+
+            .alert {
+                margin: 10px 0;
+                padding: 12px;
+                border-radius: 8px;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+
+            .alert-warning {
+                background-color: #fff3e0;
+                border: 1px solid #ffb74d;
+                color: #e65100;
+            }
+
+            .alert-error {
+                background-color: #ffebee;
+                border: 1px solid #ef5350;
+                color: #c62828;
+            }
+
+            h1 {
+                font-size: 24px;
+                margin-bottom: 20px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <!-- Modern Login Screen -->
+            <div id="login-container">
+                <h2>Welcome to Face Detection</h2>
+                <input type="text" id="suc-id" placeholder="Enter your SUC ID" required>
+                <button onclick="submitSucId()">Start Detection</button>
+            </div>
+
+            <!-- Original Main Content -->
+            <div id="main-container">
+                <h1>Advanced Face Detection</h1>
+                <div id="status">Initializing...</div>
+                <div id="alerts"></div>
+                <img id="video-feed" width="640" height="480" />
+            </div>
+        </div>
+
+        <script>
+            function submitSucId() {
+                const sucId = document.getElementById('suc-id').value;
+                if (sucId.trim() === '') {
+                    alert('Please enter a valid SUC ID');
+                    return;
+                }
+                
+                document.getElementById('login-container').style.display = 'none';
+                document.getElementById('main-container').style.display = 'block';
+                
+                initializeWebSocket();
+            }
+
+            let video_data = "";
+            const statusDiv = document.getElementById("status");
+            const alertsDiv = document.getElementById("alerts");
+            
+            const updateStatus = (data) => {
+                if (data.detected) {
+                    statusDiv.style.color = data.looking_at_camera ? '#2e7d32' : '#f57c00';
+                    statusDiv.textContent = data.looking_at_camera ? 
+                        'Face detected, looking at camera' : 
+                        'Face detected, looking away';
+                    
+                    alertsDiv.innerHTML = '';
+                    if (!data.looking_at_camera) {
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-warning';
+                        alert.textContent = 'Please look at the camera';
+                        alertsDiv.appendChild(alert);
+                    }
+                    if (data.multiple_faces) {
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-error';
+                        alert.textContent = 'Multiple faces detected!';
+                        alertsDiv.appendChild(alert);
+                    }
+                } else {
+                    statusDiv.style.color = '#d32f2f';
+                    statusDiv.textContent = 'No face detected';
+                }
+            };
+
+            const updateImage = (imageData) => {
+                const img = document.getElementById("video-feed");
+                img.src = `data:image/jpeg;base64,${imageData}`;
+            };
+
+            function initializeWebSocket() {
+    const socket = new WebSocket(`ws://${window.location.host}/ws`);
+    socket.onopen = () => {
+        const sucId = document.getElementById('suc-id').value;
+        socket.send(sucId); // Send SUC ID immediately after connection opens
+    };
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        updateImage(data.frame);
+        updateStatus(data.metrics);
+    };
+}
+
+        </script>
+    </body>
+</html>
