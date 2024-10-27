@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse
 import cv2
 import numpy as np
 import threading
@@ -12,8 +13,12 @@ from contextlib import contextmanager
 import csv
 import os
 from datetime import datetime
+from pathlib import Path
 
 app = FastAPI()
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 class FaceDetectionState:
     def __init__(self):
@@ -43,43 +48,54 @@ frame_data: Optional[str] = None
 frame_lock = threading.Lock()
 current_suc_id = None
 
-# Create CSV file if it doesn't exist
-csv_file = os.path.join('looking_away_logs.csv')
+# Ensure logs directory exists
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
+csv_file = LOGS_DIR / "looking_away_logs.csv"
 
-csv_lock = threading.Lock()  # Lock for thread-safe CSV writing
-if not os.path.exists(csv_file):
+# Initialize CSV file with headers if it doesn't exist
+if not csv_file.exists():
     with open(csv_file, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['timestamp', 'suc_id'])
 
+csv_lock = threading.Lock()
+
 def log_looking_away(suc_id):
+    if not suc_id:
+        return
+    
     try:
-        with csv_lock:  # Ensure thread-safe access
+        with csv_lock:
             with open(csv_file, 'a', newline='') as file:
                 writer = csv.writer(file)
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 writer.writerow([timestamp, suc_id])
-                print(f"Logged: {timestamp}, {suc_id}")  # Debug print
     except Exception as e:
         print(f"Error writing to CSV: {e}")
-        import traceback
-        traceback.print_exc()  # Print detailed error traceback
-
 
 def calculate_face_metrics(landmarks, image_width: int):
     landmarks_array = np.array([[lm.x, lm.y, lm.z] for lm in landmarks])
+    
+    # Key facial landmarks
     left_eye_indices = [33, 133, 157, 158]
     right_eye_indices = [362, 263, 384, 385]
+    nose_indices = [1, 4, 19]
+    
+    # Calculate positions
     left_eye_x = np.mean(landmarks_array[left_eye_indices, 0]) * image_width
     right_eye_x = np.mean(landmarks_array[right_eye_indices, 0]) * image_width
-    nose_indices = [1, 4, 19]
     nose_x = np.mean(landmarks_array[nose_indices, 0]) * image_width
+    
+    # Calculate depth and rotation
     left_eye_z = np.mean(landmarks_array[left_eye_indices, 2])
     right_eye_z = np.mean(landmarks_array[right_eye_indices, 2])
     head_rotation = np.arctan2(right_eye_z - left_eye_z, right_eye_x - left_eye_x) * 180 / np.pi
+    
+    # Calculate confidence
     z_values = landmarks_array[[*left_eye_indices, *right_eye_indices], 2]
     confidence = min(1.0, max(0.0, 1.0 - np.std(z_values) * 10))
-    print('')
+    
     return {
         'left_eye_x': float(left_eye_x),
         'right_eye_x': float(right_eye_x),
@@ -94,14 +110,15 @@ def is_looking_at_camera(metrics, image_width: int) -> bool:
     eye_symmetry = abs((metrics['left_eye_x'] - metrics['nose_x']) + (metrics['right_eye_x'] - metrics['nose_x']))
     max_asymmetry = image_width * 0.1
     max_rotation = 25.0
-    if metrics['confidence'] < 0.7:
-        return False
-    return (horizontal_deviation < max_deviation and 
+    
+    return (metrics['confidence'] >= 0.7 and
+            horizontal_deviation < max_deviation and 
             eye_symmetry < max_asymmetry and 
             abs(metrics['head_rotation']) < max_rotation)
 
 def capture_video():
     global frame_data
+    
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
         static_image_mode=False,
@@ -110,19 +127,23 @@ def capture_video():
         min_detection_confidence=0.7,
         min_tracking_confidence=0.7
     )
+    
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: Could not open camera")
         return
+        
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.1)
                 continue
+                
             frame = cv2.resize(frame, (640, 480))
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
+            
             with face_state.update() as state:
                 if results.multi_face_landmarks:
                     num_faces = len(results.multi_face_landmarks)
@@ -140,29 +161,30 @@ def capture_video():
                     state.head_rotation = 0.0
                     state.multiple_faces = False
 
-            if state.detected and not state.looking_at_camera:
+            if state.detected and not state.looking_at_camera and current_suc_id:
+                cv2.putText(frame, "Please Look at Camera", (20, 80),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 log_looking_away(current_suc_id)
-                cv2.putText(frame, "Please Look at Camera", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-
             with frame_lock:
                 frame_data = base64.b64encode(buffer).decode('utf-8')
-            time.sleep(0.033)
+                
+            time.sleep(0.033)  # ~30 FPS
+            
     except Exception as e:
         print(f"Error in video capture: {e}")
     finally:
         cap.release()
         face_mesh.close()
 
+# Start video capture thread
 video_thread = threading.Thread(target=capture_video, daemon=True)
 video_thread.start()
 
 @app.get("/")
 async def get():
-    with open("index.html", "r") as file:
-        return HTMLResponse(content=file.read())
-
+    return FileResponse("static/index.html")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -171,29 +193,23 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         # Get SUC ID from first message
-        data = await websocket.receive_text()
-        current_suc_id = data
-        if current_suc_id:
-            print(f"Received SUC ID: {current_suc_id}")  # Debug print
-        else:
-            print('nooo')
+        current_suc_id = await websocket.receive_text()
+        print(f"Connected user: {current_suc_id}")
         
         while True:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)  # Prevent busy-waiting
             with frame_lock:
                 if frame_data is not None:
-                    metrics = face_state.to_dict()
-                    if metrics['detected'] and not metrics['looking_at_camera'] and current_suc_id:
-                        log_looking_away(current_suc_id)
-                    
                     await websocket.send_json({
                         'frame': frame_data,
-                        'metrics': metrics
+                        'metrics': face_state.to_dict()
                     })
     except WebSocketDisconnect:
-        print("Client disconnected")
+        print(f"Client disconnected: {current_suc_id}")
+        current_suc_id = None
     except Exception as e:
         print(f"WebSocket error: {e}")
+        current_suc_id = None
 
 if __name__ == "__main__":
     import uvicorn
